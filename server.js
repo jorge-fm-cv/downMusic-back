@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createRateLimiter, createConcurrencyLimiter } from './rate-limit.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -10,9 +11,62 @@ const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
 
+// ---------------------------------------------------------------
+// Límites de peticiones por IP (anti-DoS)
+// ---------------------------------------------------------------
+function envInt(name, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+const RATE_LIMIT_WINDOW_MS = envInt('RATE_LIMIT_WINDOW_MS', 60_000, { min: 1_000 });
+const RATE_LIMIT_MAX = envInt('RATE_LIMIT_MAX', 120);
+const DOWNLOAD_RATE_LIMIT_MAX = envInt('DOWNLOAD_RATE_LIMIT_MAX', 20);
+const DOWNLOAD_MAX_CONCURRENT = envInt('DOWNLOAD_MAX_CONCURRENT', 2);
+
 const app = express();
-app.use(cors());
+
+// Detrás de un proxy/balanceador (nginx, Cloudflare, Railway…) hay que
+// confiar en X-Forwarded-For para que req.ip sea la IP real del cliente.
+// Sin esto, todos los clientes comparten el cubo de la IP del proxy.
+const TRUST_PROXY = String(process.env.TRUST_PROXY || '').trim();
+if (TRUST_PROXY) {
+  if (TRUST_PROXY === 'true') app.set('trust proxy', true);
+  else if (/^\d+$/.test(TRUST_PROXY)) app.set('trust proxy', Number(TRUST_PROXY));
+  else app.set('trust proxy', TRUST_PROXY); // lista de IPs/subredes
+}
+
+app.use(
+  cors({
+    exposedHeaders: ['RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset', 'Retry-After'],
+  })
+);
 app.use(express.json());
+
+const apiLimiter = createRateLimiter({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: RATE_LIMIT_MAX,
+  message: 'Demasiadas peticiones. Inténtalo de nuevo más tarde.',
+  // El healthcheck no debe consumir cuota (monitorización, load balancer…).
+  skip: (req) => req.originalUrl.split('?')[0] === '/api/health',
+});
+
+const downloadLimiter = createRateLimiter({
+  windowMs: RATE_LIMIT_WINDOW_MS,
+  max: DOWNLOAD_RATE_LIMIT_MAX,
+  message: 'Demasiadas descargas. Inténtalo de nuevo más tarde.',
+});
+
+const downloadConcurrency = createConcurrencyLimiter({
+  max: DOWNLOAD_MAX_CONCURRENT,
+  message: 'Ya tienes demasiadas descargas en curso. Espera a que terminen.',
+});
+
+app.use('/api', apiLimiter);
+app.use('/api/download', downloadLimiter, downloadConcurrency);
 
 // ---------------------------------------------------------------
 // Utilidades
@@ -249,4 +303,10 @@ source.pipe(res);
 app.listen(PORT, HOST, () => {
   console.log(`🎵 downMusic backend escuchando en http://${HOST}:${PORT}`);
   console.log(`   yt-dlp: ${YTDLP}`);
+  console.log(
+    `   límites por IP: ${RATE_LIMIT_MAX} req/${RATE_LIMIT_WINDOW_MS / 1000}s · ` +
+      `${DOWNLOAD_RATE_LIMIT_MAX} descargas/${RATE_LIMIT_WINDOW_MS / 1000}s · ` +
+      `${DOWNLOAD_MAX_CONCURRENT} descargas simultáneas`
+  );
+  console.log(`   trust proxy: ${TRUST_PROXY || 'desactivado'}`);
 });

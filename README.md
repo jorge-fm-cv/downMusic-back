@@ -13,6 +13,7 @@ El audio se transmite en *streaming* al cliente en cuanto hay datos disponibles,
 - Nombres de archivo saneados y codificados para `Content-Disposition`.
 - Limpieza de procesos hijos (`yt-dlp`/`ffmpeg`) si el cliente corta la descarga.
 - CORS habilitado, listo para consumirse desde la app móvil.
+- Límite de peticiones y de descargas simultáneas por IP (anti-DoS).
 
 ## Requisitos
 
@@ -53,18 +54,49 @@ curl http://localhost:4000/api/health
 
 ## Variables de entorno
 
-| Variable     | Por defecto | Descripción                                            |
-| ------------ | ----------- | ------------------------------------------------------ |
-| `PORT`       | `4000`      | Puerto HTTP del servidor.                              |
-| `HOST`       | `0.0.0.0`   | Interfaz de red en la que escucha.                     |
-| `YTDLP_BIN`  | `yt-dlp`    | Ruta o nombre del ejecutable de `yt-dlp`.              |
-| `FFMPEG_BIN` | `ffmpeg`    | Ruta o nombre del ejecutable de `ffmpeg`.              |
+| Variable                   | Por defecto | Descripción                                                                                      |
+| -------------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
+| `PORT`                     | `4000`      | Puerto HTTP del servidor.                                                                        |
+| `HOST`                     | `0.0.0.0`   | Interfaz de red en la que escucha.                                                               |
+| `YTDLP_BIN`                | `yt-dlp`    | Ruta o nombre del ejecutable de `yt-dlp`.                                                        |
+| `FFMPEG_BIN`               | `ffmpeg`    | Ruta o nombre del ejecutable de `ffmpeg`.                                                        |
+| `RATE_LIMIT_WINDOW_MS`     | `60000`     | Tamaño de la ventana del límite de peticiones (ms).                                              |
+| `RATE_LIMIT_MAX`           | `120`       | Peticiones por IP y ventana para el resto de `/api` (`/api/health` no cuenta).                   |
+| `DOWNLOAD_RATE_LIMIT_MAX`  | `20`        | Descargas por IP y ventana.                                                                      |
+| `DOWNLOAD_MAX_CONCURRENT`  | `2`         | Descargas simultáneas por IP (cada una lanza `yt-dlp`/`ffmpeg`).                                 |
+| `TRUST_PROXY`              | *(vacío)*   | Confianza en `X-Forwarded-For`. Usa `1`/`true` o una lista de IPs/subredes si hay proxy delante. |
 
 Ejemplo:
 
 ```bash
 PORT=8080 YTDLP_BIN=/usr/local/bin/yt-dlp npm start
 ```
+
+## Límites de peticiones (anti-DoS)
+
+Todas las rutas de `/api` están protegidas por IP mediante un limitador en memoria
+(`rate-limit.js`), sin dependencias externas:
+
+- **Límite general**: `RATE_LIMIT_MAX` peticiones por `RATE_LIMIT_WINDOW_MS` en cualquier endpoint de `/api`.
+  `/api/health` queda excluido para no romper los healthchecks.
+- **Límite de descargas**: `DOWNLOAD_RATE_LIMIT_MAX` peticiones a `/api/download` por ventana.
+- **Concurrencia**: como máximo `DOWNLOAD_MAX_CONCURRENT` descargas a la vez por IP, para evitar
+  que un cliente sature CPU/procesos con `yt-dlp` y `ffmpeg`.
+
+Al superar un límite la API responde `429 Too Many Requests` con `Retry-After` y un cuerpo JSON:
+
+```json
+{ "error": "Demasiadas peticiones. Inténtalo de nuevo más tarde.", "retryAfter": 42 }
+```
+
+También se envían las cabeceras `RateLimit-Limit`, `RateLimit-Remaining` y `RateLimit-Reset`
+(expuestas por CORS para clientes web).
+
+> **Importante detrás de un proxy/balanceador** (nginx, Cloudflare, Railway, Render…):
+> configura `TRUST_PROXY` para que `req.ip` sea la IP real del cliente. Si no, todas las
+> peticiones comparten el cubo de la IP del proxy. En despliegues con varias instancias,
+> cada proceso mantiene su propio contador (no es un límite global); para eso necesitarías
+> un almacén compartido como Redis.
 
 ## Endpoints
 
@@ -188,6 +220,7 @@ Si el fallo ocurre con la respuesta ya iniciada, el servidor cierra la conexión
 ```
 .
 ├── server.js       # Servidor Express y todos los endpoints
+├── rate-limit.js   # Limitadores en memoria por IP (peticiones y concurrencia)
 ├── package.json    # Dependencias y scripts
 ├── app.json        # Configuración de Expo/EAS del cliente
 ├── eas.json        # Perfiles de build de EAS
