@@ -1,0 +1,16 @@
+{
+  "name": "downmusic-backend",
+  "version": "1.0.0",
+  "description": "Backend de descarga de audio para downMusic (yt-dlp + Express)",
+  "private": true,
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}
