@@ -3,6 +3,9 @@
 # dependencies
 node_modules/
 
+# binarios descargados por scripts/install-binaries.mjs
+/bin/
+
 # Expo
 .expo/
 dist/

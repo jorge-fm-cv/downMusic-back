@@ -14,12 +14,15 @@ El audio se transmite en *streaming* al cliente en cuanto hay datos disponibles,
 - Limpieza de procesos hijos (`yt-dlp`/`ffmpeg`) si el cliente corta la descarga.
 - CORS habilitado, listo para consumirse desde la app móvil.
 - Límite de peticiones y de descargas simultáneas por IP (anti-DoS).
+- Instalación automática de `yt-dlp` y `ffmpeg` en el build si no están en el sistema.
 
 ## Requisitos
 
 - **Node.js 18+** (el proyecto usa `"type": "module"` y ESM).
-- **yt-dlp** instalado y disponible en el `PATH` (o configurado con `YTDLP_BIN`).
-- **ffmpeg** instalado y disponible en el `PATH` (o configurado con `FFMPEG_BIN`). Solo es necesario para convertir a MP3.
+- **yt-dlp** y **ffmpeg**. En local puedes instalarlos con el gestor de tu sistema; si no están
+  en el `PATH`, `npm install` descarga binarios estáticos en `./bin` automáticamente
+  (`scripts/install-binaries.mjs`, vía `postinstall`). También puedes fijarlos con
+  `YTDLP_BIN` / `FFMPEG_BIN`.
 
 Instalación de las dependencias del sistema en macOS:
 
@@ -35,6 +38,16 @@ cd downMusic-back
 npm install
 ```
 
+`npm install` ejecuta el `postinstall`, que:
+
+1. Reutiliza `YTDLP_BIN` / `FFMPEG_BIN` si están definidos.
+2. Reutiliza los binarios de `./bin` si ya existen y funcionan.
+3. Reutiliza los binarios del `PATH` del sistema (brew, apt…).
+4. Si no encuentra ninguno, descarga `yt-dlp` (última release oficial) y `ffmpeg`
+   (build estático) en `./bin`, que `server.js` usa automáticamente.
+
+Para omitir la descarga: `SKIP_BINARY_DOWNLOAD=1 npm install`.
+
 ## Uso
 
 ```bash
@@ -49,8 +62,37 @@ Por defecto el servidor escucha en `http://0.0.0.0:4000`.
 
 ```bash
 curl http://localhost:4000/api/health
-# {"ok":true,"service":"downmusic-backend","ytdlp":"yt-dlp","uptime":1.23}
+# {"ok":true,"service":"downmusic-backend","ytdlp":"yt-dlp","ffmpeg":"ffmpeg","uptime":1.23}
 ```
+
+## Despliegue en Render
+
+En el plan gratuito de Render **no hay acceso a `apt`**, así que `yt-dlp` y `ffmpeg` no vienen
+instalados. El proyecto lo resuelve en el propio build: al ejecutarse `npm install`, el
+`postinstall` descarga ambos binarios estáticos en `./bin` y `server.js` los detecta solo.
+
+Pasos:
+
+1. Sube los cambios a GitHub y haz **Manual Deploy → Deploy latest commit** (o deja el auto-deploy).
+2. Comprueba el log del build: deben aparecer líneas como
+   `[binaries] yt-dlp: instalado en bin/ (…)` y `[binaries] ffmpeg: instalado en bin/ (…)`.
+3. Verifica en el servicio desplegado:
+
+   ```bash
+   curl https://downmusic-back.onrender.com/api/health
+   # {"ok":true,...,"ytdlp":"/opt/render/project/src/bin/yt-dlp","ffmpeg":"/opt/render/project/src/bin/ffmpeg",...}
+   ```
+
+Si `ytdlp` o `ffmpeg` siguen mostrando solo el nombre, revisa que el **Build Command** sea
+`npm install` (el de por defecto) y que el build haya terminado sin errores.
+
+Notas para el plan gratuito:
+
+- El servicio se **duerme tras ~15 minutos sin tráfico**; la primera petición tarda en despertar.
+- El disco es **efímero**: los binarios se reinstalan en cada deploy, que es justo lo que queremos
+  para tener siempre un `yt-dlp` actualizado.
+- Define `TRUST_PROXY=1` si añades un proxy/CDN delante para que los límites por IP sigan siendo válidos.
+- En local puedes seguir usando los binarios del sistema (`brew install yt-dlp ffmpeg`); el script no descarga nada si ya los encuentra.
 
 ## Variables de entorno
 
@@ -58,8 +100,8 @@ curl http://localhost:4000/api/health
 | -------------------------- | ----------- | ------------------------------------------------------------------------------------------------ |
 | `PORT`                     | `4000`      | Puerto HTTP del servidor.                                                                        |
 | `HOST`                     | `0.0.0.0`   | Interfaz de red en la que escucha.                                                               |
-| `YTDLP_BIN`                | `yt-dlp`    | Ruta o nombre del ejecutable de `yt-dlp`.                                                        |
-| `FFMPEG_BIN`               | `ffmpeg`    | Ruta o nombre del ejecutable de `ffmpeg`.                                                        |
+| `YTDLP_BIN`                | `./bin/yt-dlp` o `yt-dlp` | Ruta del ejecutable. Si está vacío se usa `./bin` y luego el `PATH`.                |
+| `FFMPEG_BIN`               | `./bin/ffmpeg` o `ffmpeg` | Ruta del ejecutable. Si está vacío se usa `./bin` y luego el `PATH`.                |
 | `RATE_LIMIT_WINDOW_MS`     | `60000`     | Tamaño de la ventana del límite de peticiones (ms).                                              |
 | `RATE_LIMIT_MAX`           | `120`       | Peticiones por IP y ventana para el resto de `/api` (`/api/health` no cuenta).                   |
 | `DOWNLOAD_RATE_LIMIT_MAX`  | `20`        | Descargas por IP y ventana.                                                                      |
@@ -113,6 +155,7 @@ Comprueba que el servicio está vivo.
   "ok": true,
   "service": "downmusic-backend",
   "ytdlp": "yt-dlp",
+  "ffmpeg": "ffmpeg",
   "uptime": 42.5
 }
 ```
@@ -219,18 +262,23 @@ Si el fallo ocurre con la respuesta ya iniciada, el servidor cierra la conexión
 
 ```
 .
-├── server.js       # Servidor Express y todos los endpoints
-├── rate-limit.js   # Limitadores en memoria por IP (peticiones y concurrencia)
-├── package.json    # Dependencias y scripts
-├── app.json        # Configuración de Expo/EAS del cliente
-├── eas.json        # Perfiles de build de EAS
+├── server.js                  # Servidor Express y todos los endpoints
+├── rate-limit.js              # Limitadores en memoria por IP (peticiones y concurrencia)
+├── scripts/
+│   └── install-binaries.mjs   # Descarga yt-dlp/ffmpeg en bin/ (postinstall)
+├── bin/                       # Binarios descargados (gitignored; se crea en el build)
+├── package.json               # Dependencias y scripts
+├── app.json                   # Configuración de Expo/EAS del cliente
+├── eas.json                   # Perfiles de build de EAS
 └── README.md
 ```
 
 ## Notas
 
 - Este servicio no almacena audio: todo se procesa y transmite al vuelo.
-- `yt-dlp` requiere conexión a Internet y puede necesitar actualizaciones periódicas (`yt-dlp -U` o `brew upgrade yt-dlp`) cuando YouTube cambia.
+- `yt-dlp` requiere conexión a Internet y puede necesitar actualizaciones periódicas cuando
+  YouTube cambia. En local: `yt-dlp -U` o `brew upgrade yt-dlp`. En Render se descarga la
+  última release en cada deploy, así que basta con redesplegar.
 - Uso educativo/personal. Respeta los términos de servicio de YouTube y los derechos de autor del contenido que descargues.
 
 ## Licencia

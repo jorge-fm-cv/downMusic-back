@@ -1,13 +1,28 @@
 import express from 'express';
 import cors from 'cors';
 import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createRateLimiter, createConcurrencyLimiter } from './rate-limit.js';
 
 const execFileAsync = promisify(execFile);
 
-const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
-const FFMPEG = process.env.FFMPEG_BIN || 'ffmpeg';
+const ROOT = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Resuelve un binario: variable de entorno > ./bin (descargado en el build
+ * por scripts/install-binaries.mjs) > PATH del sistema.
+ */
+function resolveBin(envValue, name) {
+  if (envValue) return envValue;
+  const local = join(ROOT, 'bin', `${name}${process.platform === 'win32' ? '.exe' : ''}`);
+  return existsSync(local) ? local : name;
+}
+
+const YTDLP = resolveBin(process.env.YTDLP_BIN, 'yt-dlp');
+const FFMPEG = resolveBin(process.env.FFMPEG_BIN, 'ffmpeg');
 const PORT = Number(process.env.PORT || 4000);
 const HOST = process.env.HOST || '0.0.0.0';
 
@@ -110,7 +125,13 @@ function baseArgs(extra = []) {
 // GET /api/health
 // ---------------------------------------------------------------
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'downmusic-backend', ytdlp: YTDLP, uptime: process.uptime() });
+  res.json({
+    ok: true,
+    service: 'downmusic-backend',
+    ytdlp: YTDLP,
+    ffmpeg: FFMPEG,
+    uptime: process.uptime(),
+  });
 });
 
 // ---------------------------------------------------------------
